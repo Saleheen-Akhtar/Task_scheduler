@@ -3,16 +3,11 @@ import { Plus, Sparkles, BrainCircuit, Layout, List, Bell, ArrowUpDown, Calendar
 import { Task, TaskStatus, Priority, AIAnalysisResult } from './types';
 import TaskCard from './components/TaskCard';
 import TaskFormModal from './components/TaskFormModal';
-import LoginPage from './components/LoginPage';
 import { parseTaskWithAI, analyzeScheduleWithAI } from './services/geminiService';
-import { auth, db } from './firebase';
-import firebase from 'firebase/compat/app';
 
 type MobileTab = 'TASKS' | 'SYSTEM';
 
 const App: React.FC = () => {
-  const [user, setUser] = useState<firebase.User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
   
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -24,33 +19,6 @@ const App: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<'ALL' | TaskStatus>('ALL');
   const [sortBy, setSortBy] = useState<'DATE' | 'PRIORITY'>('DATE');
   const [mobileTab, setMobileTab] = useState<MobileTab>('TASKS');
-
-  // Authentication Listener
-  useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged((currUser) => {
-      setUser(currUser);
-      setAuthLoading(false);
-    });
-    return unsubscribe;
-  }, []);
-
-  // Firestore Real-time Listener
-  useEffect(() => {
-    if (!user) {
-      setTasks([]);
-      return;
-    }
-
-    const unsubscribe = db.collection('users').doc(user.uid).collection('tasks')
-      .onSnapshot((snapshot) => {
-        const loadedTasks = snapshot.docs.map(doc => doc.data() as Task);
-        setTasks(loadedTasks);
-      }, (error) => {
-        console.error("Firestore sync error:", error);
-      });
-
-    return unsubscribe;
-  }, [user]);
 
   // Request notification permission
   useEffect(() => {
@@ -87,7 +55,7 @@ const App: React.FC = () => {
 
   // Alert Polling Logic
   useEffect(() => {
-    if (tasks.length === 0 || !user) return;
+    if (tasks.length === 0) return;
 
     const intervalId = setInterval(() => {
       const now = new Date().getTime();
@@ -115,21 +83,18 @@ const App: React.FC = () => {
             } catch (e) { console.log(e); }
           }
           
-          // Update alerted state in Firestore WITHOUT marking as done
-          db.collection('users').doc(user.uid).collection('tasks').doc(task.id).update({
-            alerted: true
-          });
+          // Update alerted state in memory
+          setTasks(prevTasks => prevTasks.map(t => t.id === task.id ? { ...t, alerted: true } : t));
         }
       });
 
     }, 5000); 
 
     return () => clearInterval(intervalId);
-  }, [tasks, playNotificationSound, user]);
+  }, [tasks, playNotificationSound]);
 
-  // CRUD Operations (Firestore)
+  // CRUD Operations (In-memory)
   const addTask = async (taskData: Partial<Task>) => {
-    if (!user) return;
     const newTask: Task = {
       id: crypto.randomUUID(),
       title: taskData.title || 'Untitled Protocol',
@@ -143,45 +108,25 @@ const App: React.FC = () => {
       subtasks: taskData.subtasks || []
     };
     
-    try {
-      await db.collection('users').doc(user.uid).collection('tasks').doc(newTask.id).set(newTask);
-      setMobileTab('TASKS');
-    } catch (error) {
-      console.error("Error adding task:", error);
-      alert("FAILED TO WRITE TO CLOUD.");
-    }
+    setTasks(prevTasks => [...prevTasks, newTask]);
+    setMobileTab('TASKS');
   };
 
   const updateTask = async (taskData: Partial<Task>) => {
-    if (!editingTask || !user) return;
-    try {
-      await db.collection('users').doc(user.uid).collection('tasks').doc(editingTask.id).update(taskData);
-      setEditingTask(null);
-    } catch (error) {
-      console.error("Error updating task:", error);
-    }
+    if (!editingTask) return;
+    setTasks(prevTasks => prevTasks.map(t => t.id === editingTask.id ? { ...t, ...taskData } : t));
+    setEditingTask(null);
   };
 
   const deleteTask = async (id: string) => {
-    if (!user) return;
-    try {
-      await db.collection('users').doc(user.uid).collection('tasks').doc(id).delete();
-    } catch (error) {
-      console.error("Error deleting task:", error);
-    }
+    setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
   };
 
   const toggleStatus = async (id: string, status: TaskStatus) => {
-    if (!user) return;
-    try {
-      await db.collection('users').doc(user.uid).collection('tasks').doc(id).update({ status });
-    } catch (error) {
-      console.error("Error toggling status:", error);
-    }
+    setTasks(prevTasks => prevTasks.map(t => t.id === id ? { ...t, status } : t));
   };
 
   const toggleSubtask = async (taskId: string, subtaskId: string) => {
-    if (!user) return;
     const task = tasks.find(t => t.id === taskId);
     if (!task || !task.subtasks) return;
 
@@ -189,11 +134,7 @@ const App: React.FC = () => {
       st.id === subtaskId ? { ...st, isCompleted: !st.isCompleted } : st
     );
 
-    try {
-      await db.collection('users').doc(user.uid).collection('tasks').doc(taskId).update({ subtasks: updatedSubtasks });
-    } catch (error) {
-      console.error("Error toggling subtask:", error);
-    }
+    setTasks(prevTasks => prevTasks.map(t => t.id === taskId ? { ...t, subtasks: updatedSubtasks } : t));
   };
 
   const handleAiSubmit = async (e: React.FormEvent) => {
@@ -224,16 +165,6 @@ const App: React.FC = () => {
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await auth.signOut();
-      setTasks([]);
-      setAnalysis(null);
-    } catch (error) {
-      console.error("Logout failed", error);
-    }
-  };
-
   const upcomingTasksCount = tasks.filter(t => {
     if (t.status === TaskStatus.DONE) return false;
     const diff = new Date(t.dueDate).getTime() - new Date().getTime();
@@ -250,20 +181,6 @@ const App: React.FC = () => {
       }
       return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
     });
-
-  // Render Logic
-  if (authLoading) {
-    return (
-      <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center gap-4 text-zinc-500 font-mono">
-         <div className="w-8 h-8 border border-zinc-700 border-t-white animate-spin"></div>
-         <div className="text-xs tracking-widest animate-pulse">ESTABLISHING UPLINK...</div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <LoginPage />;
-  }
 
   return (
     <div className="min-h-screen bg-[#050505] text-zinc-300 selection:bg-white selection:text-black flex flex-col font-sans pb-16 md:pb-0">
@@ -291,22 +208,11 @@ const App: React.FC = () => {
             <div className="flex-1 px-4 py-2 font-mono text-xs text-zinc-500 truncate flex items-center gap-6">
                <span className="flex items-center gap-2 text-emerald-500/80">
                  <Database size={12} />
-                 STORAGE: CLOUD_SYNC
-               </span>
-               <span className="flex items-center gap-2">
-                 <UserIcon size={12} />
-                 USR: {user.email?.split('@')[0].toUpperCase()}
+                 STORAGE: LOCAL
                </span>
                {upcomingTasksCount > 0 && <span className="text-orange-500 animate-pulse">ALERT: {upcomingTasksCount} CRITICAL TASKS PENDING</span>}
             </div>
             <div className="border-l border-zinc-800 h-full flex items-center">
-               <button 
-                onClick={handleLogout}
-                className="h-full px-6 hover:bg-zinc-800 hover:text-white transition-colors font-mono text-xs uppercase tracking-widest font-bold flex items-center gap-2 border-r border-zinc-800"
-              >
-                <LogOut size={14} />
-                DISCONNECT
-              </button>
               <button 
                 onClick={() => { setEditingTask(null); setIsModalOpen(true); }}
                 className="h-full px-6 hover:bg-white hover:text-black transition-colors font-mono text-xs uppercase tracking-widest font-bold flex items-center gap-2"
